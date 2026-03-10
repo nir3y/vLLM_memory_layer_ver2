@@ -1,0 +1,7 @@
+[2026-03-09 15:09:55.243423] === 서버 시작 ===
+[2026-03-09 15:09:55.245578] BASE_DIR: C:\Users\kwater\Desktop\vLLM_rev2\vLLM_memory_layer_Mem0-cowork
+[2026-03-09 15:09:57.968330] FastMCP import OK
+[2026-03-09 15:11:25.818412] === 서버 시작 ===
+[2026-03-09 15:11:25.824440] BASE_DIR: C:\Users\kwater\Desktop\vLLM_rev2\vLLM_memory_layer_Mem0-cowork
+[2026-03-09 15:11:32.812672] FastMCP import OK
+[2026-03-09 15:11:32.879242] mcp.run() 호출

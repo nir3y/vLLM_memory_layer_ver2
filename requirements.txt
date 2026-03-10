@@ -1,0 +1,7 @@
+langchain-chroma
+langchain-huggingface
+langchain-core
+langchain-ollama
+sentence-transformers
+chromadb
+mcp[cli]
