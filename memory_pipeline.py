@@ -5,11 +5,29 @@
 
 import os
 import re
+import httpx
 from pathlib import Path
+
+# 회사 내부 self-signed 인증서 우회
+_orig_client = httpx.Client
+class _NoSSLClient(_orig_client):
+    def __init__(self, *a, **kw):
+        kw['verify'] = False
+        super().__init__(*a, **kw)
+httpx.Client = _NoSSLClient
 
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+
+
+class E5Embeddings(HuggingFaceEmbeddings):
+    """intfloat/multilingual-e5-base용 래퍼: query/passage prefix 자동 적용"""
+    def embed_documents(self, texts):
+        return super().embed_documents(["passage: " + t for t in texts])
+
+    def embed_query(self, text: str):
+        return super().embed_query("query: " + text)
 
 
 # ─────────────────────────────────────────
@@ -28,23 +46,46 @@ def parse_md_file(file_path: str) -> list[Document]:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
-    # 메타데이터 추출 
+    # 메타데이터 추출
     filename = Path(file_path).stem  # 예: "2025-06-24_SaaS화 대체 전략"
 
-    # 파일명 앞 날짜 파싱
-    date_match = re.match(r"(\d{4}-\d{2}-\d{2})", filename)
-    date = date_match.group(1) if date_match else "unknown"
+    # 1순위: 파일 내부 생성일 파싱 (볼드/리스트 형식, ISO 8601 모두 지원)
+    inner_date_match = re.search(r"\*{0,2}생성일\*{0,2}[:\s]+(\d{4}-\d{2}-\d{2})", content)
+    if inner_date_match:
+        date = inner_date_match.group(1)
+    else:
+        # 2순위: 파일명에서 날짜 파싱 (YYYY-MM-DD 또는 YYYYMMDD)
+        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", filename)
+        if date_match:
+            date = date_match.group(1)
+        else:
+            date_match8 = re.match(r"(\d{4})(\d{2})(\d{2})[_\-]", filename)
+            if date_match8:
+                date = f"{date_match8.group(1)}-{date_match8.group(2)}-{date_match8.group(3)}"
+            else:
+                date = "unknown"
 
-    # 날짜 이후 주제 파싱
-    topic = filename[11:] if date_match else filename
+    # 주제: 파일명에서 날짜 prefix 제거
+    topic_match = re.match(r"\d{4}-\d{2}-\d{2}[_\- ]*(.*)", filename)
+    if topic_match:
+        topic = topic_match.group(1)
+    else:
+        topic_match8 = re.match(r"\d{8}[_\-]*(.*)", filename)
+        topic = topic_match8.group(1) if topic_match8 else filename
 
     # 파일 내부의 ID 추출
     id_match = re.search(r"- ID: ([a-f0-9\-]+)", content)
     source_id = id_match.group(1) if id_match else filename
 
     # ── User + Assistant 쌍 추출 ─────────────
-    # "## 👤 User" 다음에 오는 "## 🤖 Assistant" 까지를 하나의 쌍으로 묶음
-    pair_pattern = r"## 👤 User\s*\n(.*?)## 🤖 Assistant\s*\n(.*?)(?=## 👤 User|## 🤖 Assistant|\Z)"
+    # 다양한 헤더 형식 지원: "## 👤 User", "## 🧑 사용자", "## 🧑 User" 등
+    USER_HDR = r"##\s+(?:👤|🧑)[^\n]*"
+    ASST_HDR = r"##\s+(?:🤖)[^\n]*"
+    pair_pattern = (
+        rf"(?:{USER_HDR})\s*\n(.*?)"
+        rf"(?:{ASST_HDR})\s*\n(.*?)"
+        rf"(?=(?:{USER_HDR})|(?:{ASST_HDR})|\Z)"
+    )
     pairs = re.findall(pair_pattern, content, re.DOTALL)
 
     documents = []
@@ -80,8 +121,8 @@ def parse_md_file(file_path: str) -> list[Document]:
 # ─────────────────────────────────────────
 def build_memory_db(md_folder: str, db_path: str = "./memory_db") -> Chroma:
     # 로컬 임베딩 모델 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="paraphrase-multilingual-MiniLM-L12-v2"
+    embeddings = E5Embeddings(
+        model_name="intfloat/multilingual-e5-base"
     )
 
     # 모든 MD 파일 수집 및 파싱
@@ -122,8 +163,8 @@ def add_new_conversation(file_path: str, db_path: str = "./memory_db"):
     새 MD 파일 1개를 기존 ChromaDB에 추가.
     Cowork 세션 종료 후 자동 호출되는 함수.
     """
-    embeddings = HuggingFaceEmbeddings(
-        model_name="paraphrase-multilingual-MiniLM-L12-v2"
+    embeddings = E5Embeddings(
+        model_name="intfloat/multilingual-e5-base"
     )
 
     db = Chroma(
@@ -156,8 +197,8 @@ def search_memory(
         k         : 반환할 결과 수
         date_filter: "2025-06" 처럼 특정 연월로 필터링 (선택)
     """
-    embeddings = HuggingFaceEmbeddings(
-        model_name="paraphrase-multilingual-MiniLM-L12-v2"
+    embeddings = E5Embeddings(
+        model_name="intfloat/multilingual-e5-base"
     )
 
     db = Chroma(

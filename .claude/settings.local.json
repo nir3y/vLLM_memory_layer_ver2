@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/40052797/Desktop/vLLM_memory_layer_ver2\" && .venv/Scripts/python.exe -c \"\nfrom langchain_chroma import Chroma\nfrom langchain_huggingface import HuggingFaceEmbeddings\nimport collections\n\ndb = Chroma\\(persist_directory='./memory_db', embedding_function=None, collection_name='memory'\\)\nraw = db.get\\(\\)\ndates = [m.get\\('date', 'unknown'\\) for m in raw.get\\('metadatas', []\\)]\ncounter = collections.Counter\\(dates\\)\nfor d, c in sorted\\(counter.items\\(\\)\\)[-20:]:\n    print\\(f'{d}: {c}개'\\)\nprint\\(f'총 {len\\(dates\\)}개 문서'\\)\n\")",
+      "Bash(cd \"C:/Users/40052797/Desktop/vLLM_memory_layer_ver2\" && .venv/Scripts/python.exe -c \"\nimport chromadb, collections\nclient = chromadb.PersistentClient\\(path='./memory_db'\\)\ncol = client.get_collection\\('memory'\\)\nraw = col.get\\(\\)\ndates = [m.get\\('date', 'unknown'\\) for m in raw.get\\('metadatas', []\\)]\ncounter = collections.Counter\\(dates\\)\nfor d, c in sorted\\(counter.items\\(\\)\\)[-20:]:\n    print\\(f'{d}: {c}'\\)\nprint\\(f'total: {len\\(dates\\)}'\\)\n\" 2>&1 | cat)",
+      "Bash(cd \"C:/Users/40052797/Desktop/vLLM_memory_layer_ver2\" && .venv/Scripts/python.exe -c \"\nimport chromadb\nclient = chromadb.PersistentClient\\(path='./memory_db'\\)\nprint\\(client.list_collections\\(\\)\\)\n\" 2>&1 | cat)"
+    ]
+  }
+}

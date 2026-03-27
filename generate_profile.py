@@ -22,7 +22,7 @@ from langchain_ollama import OllamaLLM
 # ─────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────
-MODEL = "qwen2.5:3b"
+MODEL = "qwen2.5:7b"
 CONVERSATIONS_FOLDER = "./conversations"
 OUTPUT_DIR = "./memory"
 SAMPLE_SIZE = 3000   # 전체 턴 pool에서 3000턴 샘플링

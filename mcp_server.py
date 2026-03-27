@@ -22,6 +22,7 @@ import sys
 import os
 import traceback
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR = Path(__file__).parent
 LOG_FILE = BASE_DIR / "mcp_server.log"
@@ -39,7 +40,20 @@ try:
 
     from mcp.server.fastmcp import FastMCP
     log("FastMCP import OK")
-    # memory_pipeline은 무거운 패키지라 도구 호출 시점에 lazy import
+
+    # 임베딩 모델 서버 시작 시 1회 로드 (매 호출마다 로드하면 느림)
+    import httpx
+    _orig_client = httpx.Client
+    class _NoSSLClient(_orig_client):
+        def __init__(self, *a, **kw):
+            kw['verify'] = False
+            super().__init__(*a, **kw)
+    httpx.Client = _NoSSLClient
+
+    from langchain_chroma import Chroma
+    from memory_pipeline import E5Embeddings
+    EMBEDDINGS = E5Embeddings(model_name="intfloat/multilingual-e5-base")
+    log("임베딩 모델 로드 완료")
 
 except Exception as e:
     log(f"시작 오류: {e}\n{traceback.format_exc()}")
@@ -80,7 +94,7 @@ def _read_profile(filename: str) -> str:
 def _update_single_profile(filename: str, label: str, conversation: str) -> str:
     try:
         from langchain_ollama import OllamaLLM
-        llm = OllamaLLM(model="qwen2.5:3b", num_ctx=2048)
+        llm = OllamaLLM(model="qwen2.5:7b", num_ctx=4096)
     except Exception as e:
         return f"Ollama 연결 실패: {e}"
 
@@ -92,7 +106,7 @@ def _update_single_profile(filename: str, label: str, conversation: str) -> str:
 {existing}
 
 [최근 대화]
-{conversation[:3000]}
+{conversation[:1500]}
 
 규칙:
 - 기존 내용은 최대한 유지
@@ -117,23 +131,67 @@ def _update_single_profile(filename: str, label: str, conversation: str) -> str:
 # 도구 정의
 # ─────────────────────────────────────────
 @mcp.tool()
-def search_memory_tool(query: str, k: int = 3) -> str:
+def search_memory_tool(query: str, k: int = 3, date_filter: Optional[str] = None) -> str:
     """
     과거 대화 기록에서 현재 대화와 관련된 기억을 검색합니다.
     사용자가 언급한 주제, 업무, 관심사와 관련된 과거 대화를 찾아 반환합니다.
     예: '댐 설계', '투자 관련 대화', '가족 이야기'
 
+    날짜를 지정하면 해당 날짜의 대화만 필터링합니다.
+    날짜만 알고 싶을 때는 query를 빈 문자열("")로, date_filter만 지정하세요.
+
     Args:
-        query: 검색할 주제나 키워드
+        query: 검색할 주제나 키워드 (날짜 검색 시 빈 문자열 가능)
         k: 반환할 결과 수 (기본값: 3)
+        date_filter: 날짜 필터 (예: "2024-11-03", "2024-11", "2024"). 없으면 전체 검색.
     """
-    from memory_pipeline import search_memory
-    results = search_memory(query=query, db_path=DB_PATH, k=k)
+    db = Chroma(persist_directory=DB_PATH, embedding_function=EMBEDDINGS, collection_name="memory")
+
+    # 날짜 필터만 있고 query가 없을 때: 메타데이터 필터로만 검색
+    if date_filter and not query.strip():
+        raw = db.get(where={"date": {"$eq": date_filter}})
+        docs_content = raw.get("documents", [])
+        docs_meta = raw.get("metadatas", [])
+
+        if not docs_content:
+            # 부분 날짜(연-월, 연도)는 $eq로 안 잡히므로 전체에서 필터
+            all_raw = db.get()
+            docs_content = []
+            docs_meta = []
+            for content, meta in zip(all_raw.get("documents", []), all_raw.get("metadatas", [])):
+                if date_filter in meta.get("date", ""):
+                    docs_content.append(content)
+                    docs_meta.append(meta)
+
+        if not docs_content:
+            return f"'{date_filter}' 날짜의 대화를 찾지 못했습니다."
+
+        output = f"📅 '{date_filter}' 날짜 대화 {len(docs_content)}개:\n\n"
+        for i, (content, meta) in enumerate(zip(docs_content[:k], docs_meta[:k]), 1):
+            date = meta.get("date", "날짜 없음")
+            topic = meta.get("topic", "")
+            preview = content[:300].replace("\n", " ")
+            output += f"[{i}] 📄 {topic} ({date})\n"
+            output += f"     {preview}...\n\n"
+        return output
+
+    # 일반 벡터 검색 (날짜 필터 선택 적용)
+    search_kwargs = {"k": k, "fetch_k": k * 4, "lambda_mult": 0.5}
+    if date_filter:
+        search_kwargs["filter"] = {"date": {"$eq": date_filter}}
+
+    retriever = db.as_retriever(search_type="mmr", search_kwargs=search_kwargs)
+    results = retriever.invoke(query)
 
     if not results:
+        if date_filter:
+            return f"'{date_filter}' 날짜에서 '{query}' 관련 기억을 찾지 못했습니다."
         return "관련 기억을 찾지 못했습니다."
 
-    output = f"🔍 '{query}' 관련 기억 {len(results)}개:\n\n"
+    header = f"🔍 '{query}'"
+    if date_filter:
+        header += f" ({date_filter} 필터)"
+    output = header + f" 관련 기억 {len(results)}개:\n\n"
     for i, doc in enumerate(results, 1):
         date = doc.metadata.get("date", "날짜 없음")
         topic = doc.metadata.get("topic", "")
@@ -169,6 +227,52 @@ def get_profile(category: str = "all") -> str:
 
 
 @mcp.tool()
+def get_conversation_by_date(date: str, k: int = 10) -> str:
+    """
+    특정 날짜의 대화 내용을 가져옵니다.
+    사용자가 "○○날 무슨 대화했어?", "○월 ○일 대화 보여줘" 처럼
+    날짜를 언급할 때 반드시 이 툴을 사용하세요.
+    search_memory_tool 대신 이 툴을 써야 날짜로 정확히 찾을 수 있습니다.
+
+    Args:
+        date: 날짜 문자열. 반드시 YYYY-MM-DD, YYYY-MM, YYYY 형식으로 변환해서 전달.
+              예: "26년 2월 21일" → "2026-02-21"
+                  "작년 11월"    → "2024-11"
+                  "2024년"       → "2024"
+        k: 반환할 최대 결과 수 (기본값: 10)
+    """
+    db = Chroma(persist_directory=DB_PATH, embedding_function=EMBEDDINGS, collection_name="memory")
+
+    # 정확히 일치하는 날짜 먼저 시도
+    raw = db.get(where={"date": {"$eq": date}})
+    docs_content = raw.get("documents", [])
+    docs_meta = raw.get("metadatas", [])
+
+    # 부분 일치 (연-월, 연도만 입력한 경우)
+    if not docs_content:
+        all_raw = db.get()
+        docs_content = []
+        docs_meta = []
+        for content, meta in zip(all_raw.get("documents", []), all_raw.get("metadatas", [])):
+            if meta.get("date", "").startswith(date):
+                docs_content.append(content)
+                docs_meta.append(meta)
+
+    if not docs_content:
+        return f"'{date}' 날짜의 대화를 찾지 못했습니다. 날짜 형식을 확인하세요 (예: 2026-02-21)."
+
+    output = f"📅 '{date}' 대화 {len(docs_content)}개:\n\n"
+    for i, (content, meta) in enumerate(zip(docs_content[:k], docs_meta[:k]), 1):
+        topic = meta.get("topic", "")
+        date_val = meta.get("date", "")
+        preview = content[:400].replace("\n", " ")
+        output += f"[{i}] 📄 {topic} ({date_val})\n"
+        output += f"     {preview}...\n\n"
+
+    return output
+
+
+@mcp.tool()
 def add_memory(file_path: str) -> str:
     """
     새로운 대화 MD 파일을 메모리 DB에 추가합니다.
@@ -180,8 +284,10 @@ def add_memory(file_path: str) -> str:
     if not Path(file_path).exists():
         return f"파일을 찾을 수 없습니다: {file_path}"
 
-    from memory_pipeline import add_new_conversation
-    add_new_conversation(file_path=file_path, db_path=DB_PATH)
+    from memory_pipeline import parse_md_file
+    db = Chroma(persist_directory=DB_PATH, embedding_function=EMBEDDINGS, collection_name="memory")
+    new_docs = parse_md_file(file_path)
+    db.add_documents(new_docs)
     return f"✅ '{Path(file_path).name}' 메모리에 추가 완료"
 
 
